@@ -5,11 +5,12 @@ use pretty_assertions::assert_eq;
 fn identifies_direct_app_bundle_launches() {
     let scripts = [
         r#"'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --headless=new about:blank"#,
+        r#"/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --headless=new about:blank"#,
         r#"./target/debug/Example.app/Contents/MacOS/Example --test"#,
         r#"echo preparing && '/Applications/LibreOffice.app/Contents/MacOS/soffice' --headless"#,
     ];
 
-    assert_eq!(scripts.map(requires_escalation), [true, true, true]);
+    assert_eq!(scripts.map(requires_escalation), [true, true, true, true]);
 }
 
 #[test]

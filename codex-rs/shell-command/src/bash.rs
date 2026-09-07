@@ -61,7 +61,9 @@ pub fn try_parse_word_only_commands_sequence(tree: &Tree, src: &str) -> Option<V
             if !ALLOWED_KINDS.contains(&kind) {
                 return None;
             }
-            if matches!(kind, "word" | "number") && !is_literal_word_or_number(node, src) {
+            if matches!(kind, "word" | "number")
+                && parse_literal_word_or_number(node, src).is_none()
+            {
                 return None;
             }
             if kind == "command" {
@@ -172,7 +174,7 @@ fn parse_plain_command_from_node(cmd: tree_sitter::Node, src: &str) -> Option<Ve
                 words.push(parse_literal_shell_word(word_node, src)?);
             }
             "word" | "number" => {
-                words.push(child.utf8_text(src.as_bytes()).ok()?.to_owned());
+                words.push(parse_literal_word_or_number(child, src)?);
             }
             "string" => {
                 let parsed = parse_double_quoted_string(child, src)?;
@@ -189,8 +191,7 @@ fn parse_plain_command_from_node(cmd: tree_sitter::Node, src: &str) -> Option<Ve
                 for part in child.named_children(&mut concat_cursor) {
                     match part.kind() {
                         "word" | "number" => {
-                            concatenated
-                                .push_str(part.utf8_text(src.as_bytes()).ok()?.to_owned().as_str());
+                            concatenated.push_str(&parse_literal_word_or_number(part, src)?);
                         }
                         "string" => {
                             let parsed = parse_double_quoted_string(part, src)?;
@@ -237,9 +238,7 @@ fn parse_literal_command_from_node(cmd: Node<'_>, src: &str) -> Option<Vec<Strin
 
 fn parse_literal_shell_word(node: Node<'_>, src: &str) -> Option<String> {
     match node.kind() {
-        "word" | "number" if is_literal_word_or_number(node, src) => {
-            Some(node.utf8_text(src.as_bytes()).ok()?.to_owned())
-        }
+        "word" | "number" => parse_literal_word_or_number(node, src),
         "string" => parse_double_quoted_string(node, src),
         "raw_string" => parse_raw_string(node, src),
         "concatenation" => {
@@ -254,20 +253,42 @@ fn parse_literal_shell_word(node: Node<'_>, src: &str) -> Option<String> {
     }
 }
 
-fn is_literal_word_or_number(node: Node<'_>, src: &str) -> bool {
+fn parse_literal_word_or_number(node: Node<'_>, src: &str) -> Option<String> {
     if !matches!(node.kind(), "word" | "number") {
-        return false;
+        return None;
     }
     let mut cursor = node.walk();
-    node.named_children(&mut cursor).next().is_none()
-        && node.utf8_text(src.as_bytes()).is_ok_and(|word| {
-            // A tree-sitter word can still undergo shell expansion or escape
-            // removal. Do not use its source spelling as proof of runtime argv.
-            // Include Zsh's equals expansion and extended glob syntax because
-            // this parser is also used for Zsh commands.
-            !word.starts_with('=')
-                && !word.contains(['{', '}', '*', '?', '[', ']', '\\', '~', '^', '#', '$', '`'])
-        })
+    if node.named_children(&mut cursor).next().is_some() {
+        return None;
+    }
+    let word = node.utf8_text(src.as_bytes()).ok()?;
+    if word.starts_with('=') {
+        return None;
+    }
+
+    // A tree-sitter word can still undergo shell expansion or escape removal.
+    // Decode only escaped horizontal whitespace, which has an unambiguous
+    // literal argv representation and is common in macOS application paths.
+    // Include Zsh's equals expansion and extended glob syntax in the rejected
+    // set because this parser is also used for Zsh commands.
+    let mut parsed = String::with_capacity(word.len());
+    let mut chars = word.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some(escaped @ (' ' | '\t')) => parsed.push(escaped),
+                _ => return None,
+            }
+        } else if matches!(
+            ch,
+            '{' | '}' | '*' | '?' | '[' | ']' | '~' | '^' | '#' | '$' | '`'
+        ) {
+            return None;
+        } else {
+            parsed.push(ch);
+        }
+    }
+    Some(parsed)
 }
 
 fn parse_double_quoted_string(node: Node, src: &str) -> Option<String> {
@@ -361,6 +382,21 @@ mod tests {
             vec![vec![
                 "/Applications/Example App.app/Contents/MacOS/Example App".to_string(),
                 "--test".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn accepts_backslash_escaped_spaces_in_command_names() {
+        let cmds = parse_seq(
+            r#"/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --headless"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cmds,
+            vec![vec![
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
+                "--headless".to_string(),
             ]]
         );
     }

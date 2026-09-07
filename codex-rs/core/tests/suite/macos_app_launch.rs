@@ -41,7 +41,10 @@ async fn app_bundle_launch_prompts_then_runs_outside_seatbelt() -> Result<()> {
     });
     let test = builder.build_with_auto_env(&server).await?;
 
-    let executable = test.cwd.path().join("Fixture.app/Contents/MacOS/Fixture");
+    let executable = test
+        .cwd
+        .path()
+        .join("Google Chrome.app/Contents/MacOS/Google Chrome");
     fs::create_dir_all(executable.parent().expect("fixture executable parent"))?;
     fs::write(&executable, "#!/bin/sh\nprintf launched > \"$1\"\n")?;
     let mut permissions = fs::metadata(&executable)?.permissions();
@@ -49,7 +52,8 @@ async fn app_bundle_launch_prompts_then_runs_outside_seatbelt() -> Result<()> {
     fs::set_permissions(&executable, permissions)?;
 
     let output_path = test.home.path().join("app-launch-result.txt");
-    let command = format!("'{}' '{}'", executable.display(), output_path.display());
+    let escaped_executable = executable.to_string_lossy().replace(' ', r"\ ");
+    let command = format!("{escaped_executable} '{}'", output_path.display());
     let call_id = "macos-app-launch";
     let args = json!({"cmd": command, "yield_time_ms": 10_000});
     mount_sse_once(
