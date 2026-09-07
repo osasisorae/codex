@@ -12,6 +12,17 @@
 (allow process-fork)
 (allow signal (target same-sandbox))
 
+; AppKit applications abort during registration when they inherit this sandbox
+; because LaunchServices and WindowServer access is intentionally unavailable.
+; Refuse the exec before application code starts so the caller can request an
+; explicitly approved unsandboxed retry instead of producing a native crash.
+(deny process-exec
+  (require-all
+    (regex #"[.]app/Contents/MacOS/")
+    ; Framework Python interpreters use Python.app as a command-line launcher
+    ; and do not register with AppKit/LaunchServices.
+    (require-not (regex #"/Python[.]framework/"))))
+
 ; process-info
 (allow process-info* (target same-sandbox))
 

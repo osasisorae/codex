@@ -37,6 +37,9 @@ use codex_sandboxing::policy_transforms::effective_network_sandbox_policy;
 use std::sync::Arc;
 use std::time::Instant;
 
+const MACOS_APP_LAUNCH_RETRY_REASON: &str =
+    "A macOS application launch was blocked before AppKit could crash; retry outside the sandbox?";
+
 pub(crate) struct ToolOrchestrator;
 
 pub(crate) struct OrchestratorRunResult<Out> {
@@ -363,6 +366,10 @@ impl ToolOrchestrator {
                     );
                     return Err(ToolError::Codex(err));
                 }
+                #[cfg(target_os = "macos")]
+                let macos_app_launch_denied = is_macos_app_launch_denial(output.as_ref());
+                #[cfg(not(target_os = "macos"))]
+                let macos_app_launch_denied = false;
                 // Under `Never` or `OnRequest`, do not retry without sandbox;
                 // surface a concise sandbox denial that preserves the
                 // original output.
@@ -377,7 +384,10 @@ impl ToolOrchestrator {
                                 ),
                                 ExecApprovalRequirement::NeedsApproval { .. }
                             );
-                    if !allow_on_request_network_prompt {
+                    let allow_on_request_app_launch_prompt =
+                        matches!(approval_policy, AskForApproval::OnRequest)
+                            && macos_app_launch_denied;
+                    if !allow_on_request_network_prompt && !allow_on_request_app_launch_prompt {
                         otel.sandbox_outcome(
                             &otel_tn,
                             otel_ci,
@@ -404,6 +414,8 @@ impl ToolOrchestrator {
                             "Network access to \"{}\" is blocked by policy.",
                             network_approval_context.host
                         )
+                    } else if macos_app_launch_denied {
+                        MACOS_APP_LAUNCH_RETRY_REASON.to_string()
                     } else {
                         build_denial_reason_from_output(output.as_ref())
                     };
@@ -547,4 +559,67 @@ fn build_denial_reason_from_output(_output: &ExecToolCallOutput) -> String {
     // Keep approval reason terse and stable for UX/tests, but accept the
     // output so we can evolve heuristics later without touching call sites.
     "command failed; retry without sandbox?".to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_app_launch_denial(output: &ExecToolCallOutput) -> bool {
+    if output.exit_code == 0 {
+        return false;
+    }
+
+    let text = [
+        output.stderr.text.as_str(),
+        output.stdout.text.as_str(),
+        output.aggregated_output.text.as_str(),
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    text.contains(".app/contents/macos/")
+        && [
+            "operation not permitted",
+            "permission denied",
+            "eacces",
+            "eperm",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::is_macos_app_launch_denial;
+    use codex_protocol::exec_output::ExecToolCallOutput;
+    use codex_protocol::exec_output::StreamOutput;
+
+    fn output(exit_code: i32, text: &str) -> ExecToolCallOutput {
+        ExecToolCallOutput {
+            exit_code,
+            aggregated_output: StreamOutput::new(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn identifies_nested_macos_app_exec_denials() {
+        assert!(is_macos_app_launch_denial(&output(
+            1,
+            "Error: spawn /tmp/chromium.app/Contents/MacOS/Chromium EACCES",
+        )));
+        assert!(is_macos_app_launch_denial(&output(
+            126,
+            "zsh: operation not permitted: /Applications/Example.app/Contents/MacOS/Example",
+        )));
+    }
+
+    #[test]
+    fn ignores_unrelated_denials_and_successful_app_output() {
+        assert!(!is_macos_app_launch_denial(&output(
+            1,
+            "permission denied: /tmp/output.txt",
+        )));
+        assert!(!is_macos_app_launch_denial(&output(
+            0,
+            "/Applications/Example.app/Contents/MacOS/Example: operation not permitted",
+        )));
+    }
 }

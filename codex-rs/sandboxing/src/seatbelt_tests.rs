@@ -40,6 +40,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -134,6 +136,71 @@ fn base_policy_allows_node_cpu_sysctls() {
         MACOS_SEATBELT_BASE_POLICY.contains("(sysctl-name \"hw.model\")"),
         "base policy must allow hardware model lookup for os.cpus()"
     );
+}
+
+#[test]
+fn seatbelt_blocks_app_bundle_executables_before_launch() {
+    let workspace = tempfile::Builder::new()
+        .prefix("codex-seatbelt-app-launch-")
+        .tempdir_in("/private/tmp")
+        .expect("app launch workspace");
+    let executable = workspace.path().join("Browser.app/Contents/MacOS/Browser");
+    fs::create_dir_all(executable.parent().expect("app executable parent"))
+        .expect("create fake app bundle");
+    fs::write(&executable, "#!/bin/sh\nprintf launched > \"$1\"\n")
+        .expect("write fake app executable");
+    let mut permissions = fs::metadata(&executable)
+        .expect("fake app metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).expect("make fake app executable");
+
+    let symlinked_executable = workspace.path().join("browser-command");
+    symlink(&executable, &symlinked_executable).expect("symlink fake app executable");
+    let marker = workspace.path().join("launched.txt");
+    let policy = SandboxPolicy::new_workspace_write_policy();
+
+    for program in [&executable, &symlinked_executable] {
+        let args = create_seatbelt_command_args_for_legacy_policy(
+            vec![program.display().to_string(), marker.display().to_string()],
+            &policy,
+            workspace.path(),
+            /*enforce_managed_network*/ false,
+            /*network*/ None,
+        )
+        .expect("create app-blocking seatbelt args");
+        let generated_policy = seatbelt_policy_arg(&args);
+        assert!(
+            generated_policy.contains(r#"(regex #"[.]app/Contents/MacOS/")"#),
+            "generated policy must reject app bundle executables"
+        );
+        assert!(
+            generated_policy.contains(r#"(require-not (regex #"/Python[.]framework/"))"#),
+            "generated policy must preserve framework Python interpreters"
+        );
+
+        let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(args)
+            .current_dir(workspace.path())
+            .output()
+            .expect("attempt fake app launch under seatbelt");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success()
+            && stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted")
+        {
+            eprintln!("skipping app exec check: nested Seatbelt is unavailable");
+            return;
+        }
+        assert!(
+            !output.status.success(),
+            "Seatbelt unexpectedly launched {program:?}"
+        );
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "unexpected app launch denial: {stderr}"
+        );
+        assert!(!marker.exists(), "app executable ran before approval");
+    }
 }
 
 #[test]
