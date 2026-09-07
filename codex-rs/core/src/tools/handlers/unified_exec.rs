@@ -18,6 +18,8 @@ use std::sync::Arc;
 use crate::tools::handlers::parse_arguments;
 
 mod exec_command;
+#[cfg(target_os = "macos")]
+mod macos_app_launch;
 mod write_stdin;
 
 pub use exec_command::ExecCommandHandler;

@@ -94,6 +94,8 @@ mod interrupt_hooks;
 mod items;
 mod json_result;
 mod live_cli;
+#[cfg(target_os = "macos")]
+mod macos_app_launch;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
 mod mcp_optional_startup_grace;

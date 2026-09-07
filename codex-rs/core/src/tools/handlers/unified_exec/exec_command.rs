@@ -6,6 +6,8 @@ use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
 use crate::exec_policy::prompt_is_rejected_by_policy;
 use crate::function_tool::FunctionCallError;
 use crate::maybe_emit_implicit_skill_invocation;
+#[cfg(target_os = "macos")]
+use crate::sandboxing::SandboxPermissions;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -246,8 +248,19 @@ impl ExecCommandHandler {
                 "TTY execution is disabled by config; omit `tty` or set it to false.".to_string(),
             ));
         }
-        let sandbox_permissions =
+        let mut sandbox_permissions =
             resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
+        #[cfg(target_os = "macos")]
+        if requires_host_native_cwd
+            && super::macos_app_launch::requires_escalation(&args.cmd)
+            && !sandbox_permissions.requires_escalated_permissions()
+        {
+            sandbox_permissions = SandboxPermissions::RequireEscalated;
+            args.additional_permissions = None;
+            args.justification.get_or_insert_with(|| {
+                super::macos_app_launch::ESCALATION_JUSTIFICATION.to_string()
+            });
+        }
         let hook_command = args.cmd.clone();
         maybe_emit_implicit_skill_invocation(
             session.as_ref(),

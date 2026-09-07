@@ -169,10 +169,7 @@ fn parse_plain_command_from_node(cmd: tree_sitter::Node, src: &str) -> Option<Ve
         match child.kind() {
             "command_name" => {
                 let word_node = child.named_child(0)?;
-                if word_node.kind() != "word" {
-                    return None;
-                }
-                words.push(word_node.utf8_text(src.as_bytes()).ok()?.to_owned());
+                words.push(parse_literal_shell_word(word_node, src)?);
             }
             "word" | "number" => {
                 words.push(child.utf8_text(src.as_bytes()).ok()?.to_owned());
@@ -352,6 +349,19 @@ mod tests {
         assert_eq!(
             cmds2,
             vec![vec!["echo".to_string(), "hi there".to_string()]]
+        );
+    }
+
+    #[test]
+    fn accepts_quoted_command_names() {
+        let cmds =
+            parse_seq("'/Applications/Example App.app/Contents/MacOS/Example App' --test").unwrap();
+        assert_eq!(
+            cmds,
+            vec![vec![
+                "/Applications/Example App.app/Contents/MacOS/Example App".to_string(),
+                "--test".to_string(),
+            ]]
         );
     }
 
